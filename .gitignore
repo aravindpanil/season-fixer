@@ -5,4 +5,4 @@ __pycache__/
 venv/
 data/*.csv
 !data/.gitkeep
-*plan.md
+*.md
