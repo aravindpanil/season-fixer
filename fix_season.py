@@ -106,6 +106,27 @@ def split_first_watch(entries):
     return first_watch
 
 
+def fetch_season_premiere(show_id, season_number):
+    response = trakt_request(
+        "GET",
+        f"/shows/{show_id}/seasons/{season_number}/episodes?extended=full",
+    )
+    episodes = sorted(response.json(), key=lambda episode: episode["number"])
+    for episode in episodes:
+        if episode.get("first_aired"):
+            return parse_dt(episode["first_aired"]).date()
+    return None
+
+
+def release_date_range(premiere_date, seed):
+    rng = random.Random(seed)
+    start_offset = rng.randint(30, 45)
+    span = rng.randint(60, 90)
+    start_date = premiere_date + timedelta(days=start_offset)
+    end_date = start_date + timedelta(days=span)
+    return start_date, end_date
+
+
 def find_show(rows, show_name=None, show_id=None):
     episodes = [r for r in rows if r["type"] == "episode"]
     if show_id is not None:
@@ -326,8 +347,13 @@ def parse_args():
     parser.add_argument("--show", help="Show title (case-insensitive exact match)")
     parser.add_argument("--show-id", type=int, help="Trakt show ID")
     parser.add_argument("--season", type=int, required=True)
-    parser.add_argument("--start", required=True, help="Start date in IST (YYYY-MM-DD)")
-    parser.add_argument("--end", required=True, help="End date in IST (YYYY-MM-DD)")
+    parser.add_argument("--start", help="Start date in IST (YYYY-MM-DD)")
+    parser.add_argument("--end", help="End date in IST (YYYY-MM-DD)")
+    parser.add_argument(
+        "--around-release",
+        action="store_true",
+        help="Auto-compute date range from Trakt season premiere (mutually exclusive with --start/--end)",
+    )
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducible schedules")
     parser.add_argument("--apply", action="store_true", help="Write changes to Trakt (default is dry-run)")
     args = parser.parse_args()
@@ -337,18 +363,42 @@ def parse_args():
     if args.show and args.show_id is not None:
         parser.error("Use only one of --show or --show-id.")
 
+    manual = args.start is not None or args.end is not None
+    if args.around_release and manual:
+        parser.error("Use either --around-release or --start/--end, not both.")
+    if not args.around_release and not (args.start and args.end):
+        parser.error("Provide --start and --end, or use --around-release.")
+    if manual and not (args.start and args.end):
+        parser.error("Provide both --start and --end.")
+
+    return args
+
+
+def resolve_date_range(show_id, season_number, args):
+    if args.around_release:
+        premiere_date = fetch_season_premiere(show_id, season_number)
+        if premiere_date is None:
+            raise SystemExit(
+                f"No first_aired date found for show_id={show_id} season={season_number}. "
+                "Use manual --start and --end instead."
+            )
+        start_date, end_date = release_date_range(premiere_date, args.seed)
+        print(f"Season premiere: {premiere_date}")
+        print(f"Computed date range (IST): {start_date} → {end_date}")
+        return start_date, end_date
+
     start_date = datetime.strptime(args.start, "%Y-%m-%d").date()
     end_date = datetime.strptime(args.end, "%Y-%m-%d").date()
     if end_date < start_date:
-        parser.error("--end must be on or after --start.")
-
-    return args, start_date, end_date
+        raise SystemExit("--end must be on or after --start.")
+    return start_date, end_date
 
 
 def main():
-    args, start_date, end_date = parse_args()
+    args = parse_args()
     rows = load_rows()
     show_id = find_show(rows, show_name=args.show, show_id=args.show_id)
+    start_date, end_date = resolve_date_range(show_id, args.season, args)
 
     season_entries = [
         r
