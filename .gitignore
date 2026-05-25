@@ -7,3 +7,4 @@ data/*.csv
 data/fix_apply_*.state.json
 !data/.gitkeep
 *.md
+trakt_scripts.egg-info/
