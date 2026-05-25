@@ -3,7 +3,7 @@ __pycache__/
 *.pyc
 .venv/
 venv/
-data/*.csv
+*.csv
 data/fix_apply_*.state.json
 !data/.gitkeep
 *.md
