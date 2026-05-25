@@ -9,8 +9,9 @@ from pathlib import Path
 
 from trakt.csv import load_episodes, split_first_watch
 
-OUTPUT = Path("data/flagged_seasons.csv")
-EXCLUSIONS = Path("data/exclusions.json")
+REPO_ROOT = Path(__file__).resolve().parent.parent
+OUTPUT = REPO_ROOT / "data" / "flagged_seasons.csv"
+EXCLUSIONS = REPO_ROOT / "data" / "exclusions.json"
 
 WINDOW_START = datetime(2018, 1, 1, tzinfo=timezone.utc)
 WINDOW_END = datetime(2024, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
