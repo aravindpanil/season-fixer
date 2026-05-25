@@ -1,11 +1,9 @@
 """Get a Trakt OAuth token via device auth (or refresh an existing one)."""
 
 import sys
-from pathlib import Path
 
 from trakt.auth import device_login, refresh_access_token, save_tokens
-
-ENV_PATH = Path(".env")
+from trakt.paths import ENV_PATH
 
 
 def main(refresh=False):

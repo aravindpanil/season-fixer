@@ -13,8 +13,7 @@ from trakt.client import (
     parse_rate_limit,
     trakt_post,
 )
-
-ENV_PATH = Path(".env")
+from trakt.paths import ENV_PATH
 JSON_HEADERS = {"Content-Type": "application/json"}
 TIMEOUT = 60
 BASE = "https://api.trakt.tv"

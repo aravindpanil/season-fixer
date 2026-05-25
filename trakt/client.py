@@ -5,14 +5,14 @@ import os
 import time
 from datetime import datetime, timedelta, timezone
 from email.utils import parsedate_to_datetime
-from pathlib import Path
 from zoneinfo import ZoneInfo
 
 import requests
 from dotenv import load_dotenv
 
+from trakt.paths import ENV_PATH
+
 BASE = "https://api.trakt.tv"
-ENV_PATH = Path(".env")
 IST = ZoneInfo("Asia/Kolkata")
 
 POST_MIN_INTERVAL = 1.0
