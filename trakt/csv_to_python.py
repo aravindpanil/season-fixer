@@ -24,6 +24,7 @@ def load_rows(path=DEFAULT_CSV):
         for row in csv.DictReader(f):
             row["history_id"] = int(row["history_id"])
             row["watched_dt"] = _parse_dt(row["watched_at"])
+            row["item_trakt_id"] = int(row["item_trakt_id"])
             if row["type"] == "episode":
                 row["show_id"] = int(row["show_id"])
                 row["season_number"] = int(row["season_number"])

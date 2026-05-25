@@ -18,6 +18,7 @@ _FIELDNAMES = [
     "episode_number",
     "movie_title",
     "runtime",
+    "item_trakt_id",
 ]
 
 
@@ -51,6 +52,7 @@ def _episode_row(item):
         "episode_number": episode["number"],
         "movie_title": "",
         "runtime": episode.get("runtime") or "",
+        "item_trakt_id": episode["ids"]["trakt"],
     }
 
 
@@ -66,6 +68,7 @@ def _movie_row(item):
         "episode_number": "",
         "movie_title": movie["title"],
         "runtime": movie.get("runtime") or "",
+        "item_trakt_id": movie["ids"]["trakt"],
     }
 
 
