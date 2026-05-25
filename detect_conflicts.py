@@ -2,13 +2,10 @@
 """Detect overlapping watch intervals in Trakt history."""
 
 import csv
-from datetime import timedelta
 from pathlib import Path
 
 from trakt.csv_to_python import load_rows
-
-EPISODE_DURATION = timedelta(hours=1)
-MOVIE_DURATION = timedelta(hours=3)
+from trakt.intervals import EPISODE_DURATION, MOVIE_DURATION, row_duration, row_interval
 
 OUTPUT = Path(__file__).resolve().parent / "data" / "flagged_conflicts.csv"
 
@@ -26,17 +23,6 @@ _FIELDNAMES = [
     "computed_start_a",
     "computed_start_b",
 ]
-
-
-def row_duration(row):
-    if row["runtime"]:
-        return timedelta(minutes=row["runtime"])
-    return MOVIE_DURATION if row["type"] == "movie" else EPISODE_DURATION
-
-
-def row_interval(row):
-    end = row["watched_dt"]
-    return end - row_duration(row), end
 
 
 def row_title(row):
