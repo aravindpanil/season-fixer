@@ -6,5 +6,4 @@ trakt.client     HTTP client, OAuth, token refresh, repo paths — rate limiting
 trakt.history    Fetch full watch history from Trakt → CSV
 trakt.trakt_iso  Format datetimes as the UTC ISO string Trakt expects on POST
 trakt.csv_to_python  Parse the local watch-history CSV into Python dicts
-trakt.episodes   Trakt API calls for episode and movie metadata (durations)
 """
