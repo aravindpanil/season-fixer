@@ -2,12 +2,14 @@
 """Detect suspicious bulk-import binge patterns in Trakt watch history."""
 
 import csv
+import json
 from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 INPUT = Path("data/watch_history.csv")
 OUTPUT = Path("data/flagged_seasons.csv")
+EXCLUSIONS = Path("data/exclusions.json")
 
 WINDOW_START = datetime(2018, 1, 1, tzinfo=timezone.utc)
 WINDOW_END = datetime(2024, 12, 31, 23, 59, 59, tzinfo=timezone.utc)
@@ -51,6 +53,53 @@ def load_episodes():
             row["watched_dt"] = parse_dt(row["watched_at"])
             rows.append(row)
     return rows
+
+
+def load_exclusions(episodes):
+    """Load exclusions from data/exclusions.json.
+
+    Entries may identify a show by ``show_id`` (int) or ``show_name``
+    (case-insensitive string).  Show-name entries are resolved against the
+    loaded episode data; unresolvable names emit a warning and are skipped.
+
+    Returns a dict mapping ``(show_id, season_number)`` tuples to a reason
+    string (empty string when no reason was provided).
+    """
+    if not EXCLUSIONS.exists():
+        return {}
+
+    with EXCLUSIONS.open(encoding="utf-8") as f:
+        entries = json.load(f)
+
+    # Build a case-insensitive show-name → show_id index from episode data.
+    name_to_id: dict[str, int] = {}
+    for ep in episodes:
+        name_to_id[ep["show_name"].lower()] = ep["show_id"]
+
+    exclusions: dict[tuple[int, int], str] = {}
+    for entry in entries:
+        season = entry.get("season")
+        if season is None:
+            print(f"Warning: exclusion entry missing 'season', skipping: {entry}")
+            continue
+        reason = entry.get("reason", "")
+
+        if "show_id" in entry:
+            key = (int(entry["show_id"]), int(season))
+            exclusions[key] = reason
+        elif "show_name" in entry:
+            show_id = name_to_id.get(entry["show_name"].lower())
+            if show_id is None:
+                print(
+                    f"Warning: exclusion for '{entry['show_name']}' S{int(season):02d}"
+                    " — show not found in history, skipping."
+                )
+                continue
+            exclusions[(show_id, int(season))] = reason
+        else:
+            print(f"Warning: exclusion entry missing 'show_id' or 'show_name', skipping: {entry}")
+
+    return exclusions
 
 
 def split_first_watch(entries):
@@ -205,7 +254,10 @@ def detect_flags(entries):
     return flags
 
 
-def analyze_season(entries):
+def analyze_season(entries, exclusions=None):
+    if exclusions is None:
+        exclusions = {}
+
     first_watch, rewatches = split_first_watch(entries)
     window_first = [e for e in first_watch if in_window(e["watched_dt"])] # Filter out episodes outside the window
 
@@ -218,10 +270,15 @@ def analyze_season(entries):
     
     flags = detect_flags(window_first)
 
+    show_id = entries[0]["show_id"]
+    season_number = entries[0]["season_number"]
+    exclusion_key = (show_id, season_number)
+    excluded = exclusion_key in exclusions
+
     return {
-        "show_id": entries[0]["show_id"],
+        "show_id": show_id,
         "show_name": entries[0]["show_name"],
-        "season_number": entries[0]["season_number"],
+        "season_number": season_number,
         "episode_count": len(window_first),
         "start_date": start.date().isoformat(),
         "end_date": end.date().isoformat(),
@@ -230,7 +287,9 @@ def analyze_season(entries):
         "rewatch_count": len(rewatches),
         "flags": flags,
         "history_ids": [e["history_id"] for e in window_first],
-        "flagged": bool(flags)
+        "flagged": bool(flags),
+        "excluded": excluded,
+        "exclusion_reason": exclusions.get(exclusion_key, ""),
     }
 
 
@@ -259,13 +318,14 @@ def print_report(results):
 
 def main():
     episodes = load_episodes()
+    exclusions = load_exclusions(episodes)
     grouped = defaultdict(list)
     for episode in episodes:
         grouped[(episode["show_id"], episode["season_number"])].append(episode)
 
     results = []
     for entries in grouped.values():
-        result = analyze_season(entries)
+        result = analyze_season(entries, exclusions)
         if result:
             results.append(result)
 
