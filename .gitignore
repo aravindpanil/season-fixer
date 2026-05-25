@@ -4,5 +4,6 @@ __pycache__/
 .venv/
 venv/
 data/*.csv
+data/fix_apply_*.state.json
 !data/.gitkeep
 *.md

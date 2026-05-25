@@ -5,13 +5,15 @@ import csv
 import os
 from pathlib import Path
 
-import requests
 from dotenv import load_dotenv
 
-from trakt_auth import refresh_access_token, save_tokens
+from trakt_client import (
+    TraktRateLimitError,
+    maybe_pause_for_get_pagination,
+    trakt_get,
+)
 
 OUTPUT = Path("data/watch_history.csv")
-BASE = "https://api.trakt.tv"
 ENV_PATH = Path(".env")
 
 FIELDNAMES = [
@@ -28,39 +30,22 @@ FIELDNAMES = [
 ]
 
 
-def _headers():
-    return {
-        "Content-Type": "application/json",
-        "trakt-api-version": "2",
-        "trakt-api-key": os.environ["TRAKT_CLIENT_ID"],
-        "Authorization": f"Bearer {os.environ['TRAKT_ACCESS_TOKEN']}",
-    }
-
-
-def trakt_get(path, params=None, _retried=False):
-    response = requests.get(
-        f"{BASE}{path}",
-        params=params,
-        headers=_headers(),
-        timeout=60,
-    )
-    if response.status_code == 401 and not _retried:
-        tokens = refresh_access_token()
-        save_tokens(tokens, ENV_PATH)
-        return trakt_get(path, params, _retried=True)
-    response.raise_for_status()
-    return response
-
-
 def fetch_all_history(history_type):
     page = 1
     items = []
     while True:
-        response = trakt_get(f"/sync/history/{history_type}", {"page": page, "limit": 1000})
+        response = trakt_get(
+            f"/sync/history/{history_type}",
+            {"page": page, "limit": 1000},
+            context=f"fetching {history_type} history page {page}",
+            recovery="Re-run fetch_history.py after the rate limit clears.",
+        )
         batch = response.json()
         items.extend(batch)
-        if page >= int(response.headers.get("X-Pagination-Page-Count", 1)):
+        page_count = int(response.headers.get("X-Pagination-Page-Count", 1))
+        if page >= page_count:
             break
+        maybe_pause_for_get_pagination(response, page)
         page += 1
     return items
 
@@ -123,7 +108,11 @@ def refresh_watch_history(output=OUTPUT):
 
 
 def main():
-    rows, path = refresh_watch_history()
+    try:
+        rows, path = refresh_watch_history()
+    except TraktRateLimitError as exc:
+        raise SystemExit(str(exc)) from None
+
     episodes = sum(1 for r in rows if r["type"] == "episode")
     movies = sum(1 for r in rows if r["type"] == "movie")
     print(f"Wrote {len(rows)} rows to {path} ({episodes} episodes, {movies} movies)")

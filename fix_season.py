@@ -3,21 +3,17 @@
 
 import argparse
 import csv
-import os
+import hashlib
+import json
 import random
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-import requests
-from dotenv import load_dotenv
-
 from fetch_history import refresh_watch_history
-from trakt_auth import refresh_access_token, save_tokens
+from trakt_client import TraktRateLimitError, trakt_get, trakt_post
 
 INPUT = Path("data/watch_history.csv")
-BASE = "https://api.trakt.tv"
-ENV_PATH = Path(".env")
 IST = ZoneInfo("Asia/Kolkata")
 
 WINDOW_START = datetime(2018, 1, 1, tzinfo=timezone.utc)
@@ -27,6 +23,15 @@ EPISODE_DURATION = timedelta(hours=1)
 MOVIE_DURATION = timedelta(hours=3)
 MIN_GAP = timedelta(minutes=2)
 EVENING_WINDOW_RATIO = 0.85
+REMOVE_CHUNK_SIZE = 50
+RELEASE_LAG_MIN = 30
+RELEASE_LAG_MAX = 45
+RELEASE_SPAN_MIN = 60
+RELEASE_SPAN_MAX = 90
+
+PHASE_REMOVE = "remove"
+PHASE_ADD = "add"
+PHASE_COMPLETE = "complete"
 
 
 def parse_dt(value):
@@ -46,30 +51,75 @@ def in_window(dt):
     return WINDOW_START <= dt <= WINDOW_END
 
 
-def _headers():
-    load_dotenv(ENV_PATH)
-    return {
-        "Content-Type": "application/json",
-        "trakt-api-version": "2",
-        "trakt-api-key": os.environ["TRAKT_CLIENT_ID"],
-        "Authorization": f"Bearer {os.environ['TRAKT_ACCESS_TOKEN']}",
-    }
+def apply_state_path(show_id, season_number):
+    return Path(f"data/fix_apply_{show_id}_s{season_number}.state.json")
 
 
-def trakt_request(method, path, json_body=None, _retried=False):
-    response = requests.request(
-        method,
-        f"{BASE}{path}",
-        json=json_body,
-        headers=_headers(),
-        timeout=120,
+def compute_plan_hash(plan):
+    rows = [
+        {
+            "history_id": row["history_id"],
+            "episode_number": row["episode_number"],
+            "new_watched_at": row["new_watched_at"],
+        }
+        for row in plan
+    ]
+    payload = json.dumps(rows, sort_keys=True)
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]
+
+
+def load_apply_state(path):
+    if not path.exists():
+        return None
+    return json.loads(path.read_text(encoding="utf-8"))
+
+
+def save_apply_state(path, state):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    state["timestamp"] = datetime.now(timezone.utc).isoformat()
+    path.write_text(json.dumps(state, indent=2) + "\n", encoding="utf-8")
+
+
+def clear_apply_state(path):
+    if path.exists():
+        path.unlink()
+
+
+def phase_status(state, total_chunks):
+    phase = state.get("phase", PHASE_REMOVE)
+    chunks_done = state.get("chunks_completed", 0)
+    removed = len(state.get("removed_ids", []))
+    total = state.get("total_to_remove", 0)
+
+    if phase == PHASE_REMOVE:
+        return f"remove {chunks_done}/{total_chunks} chunks ({removed}/{total} ids removed), add not started"
+    if phase == PHASE_ADD:
+        return f"remove complete ({removed}/{total} ids removed), add not started"
+    if phase == PHASE_COMPLETE:
+        return "remove and add complete"
+    return phase
+
+
+def recovery_message(state_path, state, total_chunks):
+    status = phase_status(state, total_chunks)
+    return (
+        f"{status}. Resume with the same args plus --resume-apply "
+        f"(state: {state_path.name})"
     )
-    if response.status_code == 401 and not _retried:
-        tokens = refresh_access_token()
-        save_tokens(tokens, ENV_PATH)
-        return trakt_request(method, path, json_body, _retried=True)
-    response.raise_for_status()
-    return response
+
+
+def sync_deleted_count(body):
+    deleted = body.get("deleted", {})
+    return sum(
+        deleted.get(key, 0)
+        for key in ("movies", "episodes", "shows", "seasons", "people", "lists")
+    )
+
+
+def sync_not_found_ids(body):
+    not_found = body.get("not_found", {})
+    ids = not_found.get("ids")
+    return ids or []
 
 
 def load_rows():
@@ -285,14 +335,58 @@ def schedule_episodes(entries, start_date, end_date, blocked, seed):
     return plan
 
 
-def remove_history(history_ids):
-    chunk_size = 50
-    for i in range(0, len(history_ids), chunk_size):
-        chunk = history_ids[i : i + chunk_size]
-        trakt_request("POST", "/sync/history/remove", {"ids": chunk})
+def remove_history(history_ids, *, state_path, state):
+    chunks = [
+        history_ids[index : index + REMOVE_CHUNK_SIZE]
+        for index in range(0, len(history_ids), REMOVE_CHUNK_SIZE)
+    ]
+    total_chunks = len(chunks)
+    start_chunk = state.get("chunks_completed", 0)
+
+    if start_chunk >= total_chunks:
+        state["phase"] = PHASE_ADD
+        save_apply_state(state_path, state)
+        return
+
+    for chunk_index in range(start_chunk, total_chunks):
+        chunk = chunks[chunk_index]
+        chunk_num = chunk_index + 1
+        context = f"removing {len(chunk)} history entries, chunk {chunk_num}/{total_chunks}"
+        response = trakt_post(
+            "/sync/history/remove",
+            {"ids": chunk},
+            context=context,
+            timeout=120,
+            phase=phase_status(state, total_chunks),
+            recovery=recovery_message(state_path, state, total_chunks),
+        )
+        body = response.json()
+
+        not_found_ids = sync_not_found_ids(body)
+        if not_found_ids:
+            raise SystemExit(
+                f"Remove failed on chunk {chunk_num}/{total_chunks}: "
+                f"{len(not_found_ids)} history id(s) not found "
+                f"(first few: {not_found_ids[:5]}). Aborting before add."
+            )
+
+        deleted_count = sync_deleted_count(body)
+        if deleted_count < len(chunk):
+            raise SystemExit(
+                f"Remove incomplete on chunk {chunk_num}/{total_chunks}: "
+                f"expected {len(chunk)} deleted, got {deleted_count}. Aborting before add."
+            )
+
+        state.setdefault("removed_ids", []).extend(chunk)
+        state["chunks_completed"] = chunk_num
+        state["phase"] = PHASE_REMOVE
+        save_apply_state(state_path, state)
+
+    state["phase"] = PHASE_ADD
+    save_apply_state(state_path, state)
 
 
-def add_history(show_id, season_number, episodes):
+def add_history(show_id, season_number, episodes, *, state_path, state, total_chunks):
     payload = {
         "shows": [
             {
@@ -309,7 +403,218 @@ def add_history(show_id, season_number, episodes):
             }
         ]
     }
-    trakt_request("POST", "/sync/history", payload)
+    response = trakt_post(
+        "/sync/history",
+        payload,
+        context=f"adding {len(episodes)} episodes for show_id={show_id} season={season_number}",
+        timeout=120,
+        phase=phase_status(state, total_chunks),
+        recovery=recovery_message(state_path, state, total_chunks),
+    )
+    body = response.json()
+    added = body.get("added", {})
+    episodes_added = added.get("episodes", 0)
+    if episodes_added < len(episodes):
+        raise SystemExit(
+            f"Add incomplete: expected {len(episodes)} episodes, added {episodes_added}. "
+            f"State saved at {state_path}. Re-run with --resume-apply after checking Trakt."
+        )
+
+    state["phase"] = PHASE_COMPLETE
+    save_apply_state(state_path, state)
+
+
+def fetch_season_premiere(show_id, season_number):
+    response = trakt_get(
+        f"/shows/{show_id}/seasons/{season_number}/episodes",
+        {"extended": "full"},
+        context=f"fetching season {season_number} episodes for premiere date",
+    )
+    episodes = sorted(response.json(), key=lambda episode: episode["number"])
+    for episode in episodes:
+        if episode.get("first_aired"):
+            return parse_dt(episode["first_aired"]).date()
+    return None
+
+
+def release_date_range(premiere_date, seed):
+    rng = random.Random(seed)
+    start_date = premiere_date + timedelta(days=rng.randint(RELEASE_LAG_MIN, RELEASE_LAG_MAX))
+    end_date = start_date + timedelta(days=rng.randint(RELEASE_SPAN_MIN, RELEASE_SPAN_MAX))
+    return start_date, end_date
+
+
+def prepare_season(rows, show_name, show_id, season_number):
+    show_id = find_show(rows, show_name=show_name, show_id=show_id)
+    season_entries = [
+        row
+        for row in rows
+        if row["type"] == "episode"
+        and row["show_id"] == show_id
+        and row["season_number"] == season_number
+    ]
+    if not season_entries:
+        raise SystemExit(f"No episode history found for show_id={show_id} season={season_number}.")
+
+    first_watch = split_first_watch(season_entries)
+    to_fix = [entry for entry in first_watch if in_window(entry["watched_dt"])]
+    if not to_fix:
+        raise SystemExit("No first-watch entries in 2018–2024 for this season.")
+
+    exclude_ids = {entry["history_id"] for entry in to_fix}
+    blocked = build_blocked_intervals(rows, exclude_ids)
+    show_name = to_fix[0]["show_name"]
+    return show_id, to_fix, blocked, show_name
+
+
+def build_plan(to_fix, blocked, start_date, end_date, seed):
+    return schedule_episodes(to_fix, start_date, end_date, blocked, seed)
+
+
+def print_plan(plan, show_id, season_number, start_date, end_date, *, premiere=None):
+    preview_path = write_preview(plan, show_id, season_number)
+    show_name = plan[0]["show_name"]
+    print(f"\n{show_name} S{season_number:02d}: scheduling {len(plan)} first-watch episode(s)")
+    if premiere is not None:
+        print(f"Season premiere: {premiere.isoformat()}")
+    print(f"Date range (IST): {start_date} → {end_date}")
+    print(f"Preview written to {preview_path}")
+    for row in plan:
+        print(
+            f"  E{row['episode_number']:02d}  {row['old_watched_at']}  ->  {row['new_watched_at']}"
+        )
+    return preview_path
+
+
+def prompt_date(label):
+    while True:
+        try:
+            value = input(f"{label} (IST, YYYY-MM-DD): ").strip()
+        except EOFError:
+            raise SystemExit("\nCancelled.")
+        if not value:
+            print("Enter a date in YYYY-MM-DD format.")
+            continue
+        try:
+            return datetime.strptime(value, "%Y-%m-%d").date()
+        except ValueError:
+            print("Invalid date. Use YYYY-MM-DD.")
+
+
+def prompt_yes_no(prompt, default=True):
+    suffix = "Y/n" if default else "y/N"
+    while True:
+        try:
+            value = input(f"{prompt} [{suffix}]: ").strip().lower()
+        except EOFError:
+            raise SystemExit("\nCancelled.")
+        if not value:
+            return default
+        if value in {"y", "yes"}:
+            return True
+        if value in {"n", "no"}:
+            return False
+        print("Enter y or n.")
+
+
+def prompt_custom_dates():
+    start_date = prompt_date("Start date")
+    end_date = prompt_date("End date")
+    if end_date < start_date:
+        raise SystemExit("--end must be on or after --start.")
+    return start_date, end_date
+
+
+def apply_plan(
+    show_id,
+    season_number,
+    plan,
+    preview_path,
+    *,
+    resume=False,
+    refresh_after=False,
+    start_date=None,
+    end_date=None,
+    date_mode=None,
+):
+    state_path = apply_state_path(show_id, season_number)
+    plan_hash = compute_plan_hash(plan)
+    history_ids = [row["history_id"] for row in plan]
+    total_chunks = max(1, (len(history_ids) + REMOVE_CHUNK_SIZE - 1) // REMOVE_CHUNK_SIZE)
+
+    if resume:
+        state = load_apply_state(state_path)
+        if not state:
+            raise SystemExit(f"No apply state at {state_path}. Run --apply first.")
+        if state.get("plan_hash") != plan_hash:
+            raise SystemExit(
+                "Plan hash mismatch between preview and saved state. "
+                "Re-run with the same --show/--show-id, --season, and --seed, "
+                "or delete the state file and start over."
+            )
+        if state.get("phase") == PHASE_COMPLETE:
+            print(f"Apply already complete (state: {state_path}).")
+            clear_apply_state(state_path)
+            return
+        print(f"Resuming apply from {state_path} ({phase_status(state, total_chunks)})")
+    else:
+        existing = load_apply_state(state_path)
+        if existing and existing.get("phase") not in {None, PHASE_COMPLETE}:
+            raise SystemExit(
+                f"Incomplete apply found at {state_path} ({phase_status(existing, total_chunks)}). "
+                "Use --resume-apply to continue or delete the state file to start over."
+            )
+        state = {
+            "phase": PHASE_REMOVE,
+            "show_id": show_id,
+            "season_number": season_number,
+            "plan_hash": plan_hash,
+            "preview_path": str(preview_path),
+            "removed_ids": [],
+            "total_to_remove": len(plan),
+            "chunks_completed": 0,
+            "show_name": plan[0]["show_name"],
+        }
+        if start_date is not None:
+            state["start_date"] = start_date.isoformat()
+        if end_date is not None:
+            state["end_date"] = end_date.isoformat()
+        if date_mode is not None:
+            state["date_mode"] = date_mode
+        save_apply_state(state_path, state)
+
+    try:
+        if state.get("phase") == PHASE_REMOVE:
+            remove_history(history_ids, state_path=state_path, state=state)
+        if state.get("phase") == PHASE_ADD:
+            add_history(
+                show_id,
+                season_number,
+                plan,
+                state_path=state_path,
+                state=state,
+                total_chunks=total_chunks,
+            )
+    except TraktRateLimitError as exc:
+        raise SystemExit(str(exc)) from None
+
+    clear_apply_state(state_path)
+    print(f"Updated {len(plan)} episode(s) on Trakt.")
+
+    if refresh_after:
+        print("\nRefreshing local watch history...")
+        try:
+            rows, path = refresh_watch_history()
+        except TraktRateLimitError as exc:
+            raise SystemExit(
+                f"{exc}\n\nApply succeeded on Trakt. Local CSV was not refreshed; "
+                "run fetch_history.py after the rate limit clears."
+            ) from None
+        episodes = sum(1 for r in rows if r["type"] == "episode")
+        movies = sum(1 for r in rows if r["type"] == "movie")
+        print(f"Wrote {len(rows)} rows to {path} ({episodes} episodes, {movies} movies)")
+    else:
+        print("\nRun fetch_history.py to refresh local watch history.")
 
 
 def write_preview(plan, show_id, season_number):
@@ -348,6 +653,16 @@ def parse_args():
     parser.add_argument("--show-id", type=int, help="Trakt show ID")
     parser.add_argument("--season", type=int, required=True)
     parser.add_argument("--seed", type=int, default=42, help="Random seed for reproducible schedules")
+    parser.add_argument(
+        "--resume-apply",
+        action="store_true",
+        help="Continue an interrupted apply using the saved state file (skips prompts)",
+    )
+    parser.add_argument(
+        "--refresh-after-apply",
+        action="store_true",
+        help="Refresh data/watch_history.csv after a successful apply (may hit GET rate limits)",
+    )
     args = parser.parse_args()
 
     if not args.show and args.show_id is None:
@@ -358,116 +673,95 @@ def parse_args():
     return args
 
 
-def prepare_season(rows, show_name, show_id, season_number):
-    show_id = find_show(rows, show_name=show_name, show_id=show_id)
-    season_entries = [
-        r
-        for r in rows
-        if r["type"] == "episode" and r["show_id"] == show_id and r["season_number"] == season_number
-    ]
-    if not season_entries:
-        raise SystemExit(f"No episode history found for show_id={show_id} season={season_number}.")
+def rebuild_plan_from_state(state, to_fix, blocked, show_id, season_number, seed):
+    date_mode = state.get("date_mode")
+    if date_mode == "custom":
+        start_date = datetime.strptime(state["start_date"], "%Y-%m-%d").date()
+        end_date = datetime.strptime(state["end_date"], "%Y-%m-%d").date()
+        return build_plan(to_fix, blocked, start_date, end_date, seed), start_date, end_date, date_mode
 
-    first_watch = split_first_watch(season_entries)
-    to_fix = [e for e in first_watch if in_window(e["watched_dt"])]
-    if not to_fix:
-        raise SystemExit("No first-watch entries in 2018–2024 for this season.")
-
-    exclude_ids = {e["history_id"] for e in to_fix}
-    blocked = build_blocked_intervals(rows, exclude_ids)
-    show_name = to_fix[0]["show_name"]
-    return show_id, to_fix, blocked, show_name
-
-
-def print_plan(plan, start_date, end_date, show_id, season_number, *, premiere=None, range_label=None):
-    preview_path = write_preview(plan, show_id, season_number)
-    show_name = plan[0]["show_name"]
-    print(f"\n{show_name} S{season_number:02d}: scheduling {len(plan)} first-watch episode(s)")
-    if premiere is not None:
-        print(f"Season premiere: {premiere}")
-    if range_label:
-        print(f"{range_label} (IST): {start_date} → {end_date}")
-    else:
-        print(f"Date range (IST): {start_date} → {end_date}")
-    print(f"Preview written to {preview_path}")
-    for row in plan:
-        print(
-            f"  E{row['episode_number']:02d}  {row['old_watched_at']}  ->  {row['new_watched_at']}"
+    premiere = fetch_season_premiere(show_id, season_number)
+    if premiere is None:
+        raise SystemExit(
+            f"Cannot rebuild release-date plan for resume (no premiere on Trakt). "
+            f"Check state at {apply_state_path(show_id, season_number)}."
         )
-    return preview_path
+    start_date, end_date = release_date_range(premiere, seed)
+    return build_plan(to_fix, blocked, start_date, end_date, seed), start_date, end_date, "release"
 
 
-def prompt_choice():
-    print("\nHow do you want to proceed?")
-    print("  [1] Apply release-date plan (shown above)")
-    print("  [2] Enter custom start/end dates")
-    print("  [0] Cancel")
-    valid = {"0", "1", "2"}
-    while True:
-        try:
-            choice = input("> ").strip()
-        except EOFError:
-            print("\nCancelled.")
-            return "0"
-        if choice in valid:
-            return choice
-        print("Enter 0, 1, or 2.")
+def main():
+    args = parse_args()
+    rows = load_rows()
+    show_id, to_fix, blocked, show_name = prepare_season(
+        rows, args.show, args.show_id, args.season
+    )
 
+    if args.resume_apply:
+        state_path = apply_state_path(show_id, args.season)
+        state = load_apply_state(state_path)
+        if not state:
+            raise SystemExit(f"No apply state at {state_path}. Approve a plan first.")
+        plan, start_date, end_date, date_mode = rebuild_plan_from_state(
+            state, to_fix, blocked, show_id, args.season, args.seed
+        )
+        preview_path = print_plan(
+            plan, show_id, args.season, start_date, end_date, premiere=None
+        )
+        print("\nResuming interrupted apply...")
+        apply_plan(
+            show_id,
+            args.season,
+            plan,
+            preview_path,
+            resume=True,
+            refresh_after=args.refresh_after_apply,
+            start_date=start_date,
+            end_date=end_date,
+            date_mode=date_mode,
+        )
+        return
 
-def prompt_date(label):
-    while True:
-        try:
-            value = input(f"{label} (IST, YYYY-MM-DD): ").strip()
-        except EOFError:
-            raise SystemExit("\nCancelled.")
-        try:
-            return datetime.strptime(value, "%Y-%m-%d").date()
-        except ValueError:
-            print("Invalid date. Use YYYY-MM-DD.")
-
-
-def prompt_yes_no(prompt, default=True):
-    suffix = "[Y/n]" if default else "[y/N]"
-    while True:
-        try:
-            answer = input(f"{prompt} {suffix}: ").strip().lower()
-        except EOFError:
-            print("\nCancelled.")
-            return False
-        if not answer:
-            return default
-        if answer in {"y", "yes"}:
-            return True
-        if answer in {"n", "no"}:
-            return False
-        print("Enter y or n.")
-
-
-def prompt_custom_dates(to_fix, blocked, seed, show_id, season_number):
-    start_date = prompt_date("Start date")
-    end_date = prompt_date("End date")
-    if end_date < start_date:
-        raise SystemExit("End date must be on or after start date.")
-
-    plan = schedule_episodes(to_fix, start_date, end_date, blocked, seed)
-    print_plan(plan, start_date, end_date, show_id, season_number, range_label="Custom date range")
-    if prompt_yes_no("Apply this plan to Trakt?"):
-        apply_plan(plan, show_id, season_number)
+    premiere = fetch_season_premiere(show_id, args.season)
+    if premiere is not None:
+        start_date, end_date = release_date_range(premiere, args.seed)
+        plan = build_plan(to_fix, blocked, start_date, end_date, args.seed)
+        preview_path = print_plan(plan, show_id, args.season, start_date, end_date, premiere=premiere)
+        if prompt_yes_no("Apply this release-date plan to Trakt?"):
+            print("\nApplying changes to Trakt...")
+            apply_plan(
+                show_id,
+                args.season,
+                plan,
+                preview_path,
+                refresh_after=args.refresh_after_apply,
+                start_date=start_date,
+                end_date=end_date,
+                date_mode="release",
+            )
+            return
+        print("\nEnter custom start/end dates instead.")
     else:
-        print("No changes applied.")
+        print(f"\nNo season premiere found on Trakt for {show_name} S{args.season:02d}.")
+        print("Enter custom start/end dates instead.")
 
-
-def apply_plan(plan, show_id, season_number):
-    print(f"\nApplying {len(plan)} episode(s) to Trakt...")
-    remove_history([row["history_id"] for row in plan])
-    add_history(show_id, season_number, plan)
-    print(f"Updated {len(plan)} episode(s).")
-
-    print("\nRefreshing local watch history...")
-    rows, path = refresh_watch_history()
-    episodes = sum(1 for r in rows if r["type"] == "episode")
-    movies = sum(1 for r in rows if r["type"] == "movie")
-    print(f"Wrote {len(rows)} rows to {path} ({episodes} episodes, {movies} movies)")
+    start_date, end_date = prompt_custom_dates()
+    plan = build_plan(to_fix, blocked, start_date, end_date, args.seed)
+    preview_path = print_plan(plan, show_id, args.season, start_date, end_date)
+    if prompt_yes_no("Apply this plan to Trakt?"):
+        print("\nApplying changes to Trakt...")
+        apply_plan(
+            show_id,
+            args.season,
+            plan,
+            preview_path,
+            refresh_after=args.refresh_after_apply,
+            start_date=start_date,
+            end_date=end_date,
+            date_mode="custom",
+        )
+    else:
+        print("Cancelled. No changes written to Trakt.")
 
 
 def main():

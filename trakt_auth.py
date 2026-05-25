@@ -8,10 +8,17 @@ from pathlib import Path
 import requests
 from dotenv import load_dotenv, set_key
 
-BASE = "https://api.trakt.tv"
+from trakt_client import (
+    TraktRateLimitError,
+    format_duration,
+    parse_rate_limit,
+    trakt_post,
+)
+
 ENV_PATH = Path(".env")
 JSON_HEADERS = {"Content-Type": "application/json"}
 TIMEOUT = 60
+BASE = "https://api.trakt.tv"
 
 
 def _load_credentials():
@@ -24,21 +31,24 @@ def _load_credentials():
 
 
 def _post(path, json_body):
-    response = requests.post(
-        f"{BASE}{path}",
-        json=json_body,
-        headers=JSON_HEADERS,
-        timeout=TIMEOUT,
-    )
-    response.raise_for_status()
-    return response
+    try:
+        return trakt_post(
+            path,
+            json_body,
+            authed=False,
+            context=path,
+            timeout=TIMEOUT,
+            recovery="Wait for the retry time, then run trakt_auth.py again.",
+        )
+    except TraktRateLimitError as exc:
+        raise SystemExit(str(exc)) from None
 
 
 def device_login():
     """Walk through Trakt device auth and return token response."""
 
     client_id, client_secret = _load_credentials()
-    
+
     codes = _post("/oauth/device/code", {"client_id": client_id}).json()
     url = codes.get("verification_url") or "https://trakt.tv/activate"
     print(f"Go to {url}")
@@ -67,6 +77,12 @@ def device_login():
         if token_response.status_code == 400:
             pass
         elif token_response.status_code == 429:
+            limit_info = parse_rate_limit(token_response)
+            wait_seconds = limit_info["retry_after_seconds"]
+            print(
+                f"Rate limited during device auth. Waiting {format_duration(wait_seconds)}..."
+            )
+            time.sleep(wait_seconds)
             interval = min(interval + 1, 10)
         else:
             token_response.raise_for_status()
