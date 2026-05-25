@@ -9,7 +9,7 @@ requires-python = ">=3.11"
 dependencies = ["requests>=2.31.0", "python-dotenv>=1.0.0"]
 
 [project.scripts]
-trakt-auth = "trakt.auth:main"
+trakt-auth = "trakt.client:main"
 
 [tool.setuptools.packages.find]
 where = ["."]

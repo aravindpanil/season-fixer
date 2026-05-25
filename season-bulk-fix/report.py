@@ -7,7 +7,8 @@ from collections import defaultdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
-INPUT = Path("data/watch_history.csv")
+from trakt.csv import load_episodes, split_first_watch
+
 OUTPUT = Path("data/flagged_seasons.csv")
 EXCLUSIONS = Path("data/exclusions.json")
 
@@ -24,35 +25,8 @@ OUTLIER_CLUSTER_HOURS = 48
 OUTLIER_DISTANCE_DAYS = 30
 
 
-def parse_dt(value):
-    if value.endswith("Z"):
-        value = value[:-1] + "+00:00"
-    dt = datetime.fromisoformat(value)
-    if dt.tzinfo is None:
-        dt = dt.replace(tzinfo=timezone.utc)
-    return dt.astimezone(timezone.utc)
-
-
 def in_window(dt):
     return WINDOW_START <= dt <= WINDOW_END
-
-
-def load_episodes():
-    """Load episode history from CSV file while filtering out movies"""
-    if not INPUT.exists():
-        raise SystemExit(f"Missing {INPUT}. Run fetch_history.py first.")
-    rows = []
-    with INPUT.open(newline="", encoding="utf-8") as f:
-        for row in csv.DictReader(f):
-            if row["type"] != "episode":
-                continue
-            row["history_id"] = int(row["history_id"])
-            row["show_id"] = int(row["show_id"])
-            row["season_number"] = int(row["season_number"])
-            row["episode_number"] = int(row["episode_number"])
-            row["watched_dt"] = parse_dt(row["watched_at"])
-            rows.append(row)
-    return rows
 
 
 def load_exclusions(episodes):
@@ -100,26 +74,6 @@ def load_exclusions(episodes):
             print(f"Warning: exclusion entry missing 'show_id' or 'show_name', skipping: {entry}")
 
     return exclusions
-
-
-def split_first_watch(entries):
-    entries = sorted(entries, key=lambda e: e["watched_dt"])
-    all_episodes = {e["episode_number"] for e in entries}
-    seen = set()
-    first_watch = []
-    rewatches = []
-    complete = False
-
-    for entry in entries:
-        if complete:
-            rewatches.append(entry)
-            continue
-        first_watch.append(entry)
-        seen.add(entry["episode_number"])
-        if seen >= all_episodes:
-            complete = True
-
-    return first_watch, rewatches
 
 
 def span_days(start_dt, end_dt):
