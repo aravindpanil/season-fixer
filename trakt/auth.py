@@ -1,6 +1,7 @@
 """Trakt OAuth device login and token refresh."""
 
 import os
+import sys
 import time
 from pathlib import Path
 
@@ -36,7 +37,7 @@ def _post(path, json_body):
             authed=False,
             context=path,
             timeout=TIMEOUT,
-            recovery="Wait for the retry time, then run trakt_auth.py again.",
+            recovery="Wait for the retry time, then run trakt-auth again.",
         )
     except TraktRateLimitError as exc:
         raise SystemExit(str(exc)) from None
@@ -118,3 +119,14 @@ def save_tokens(tokens, env_path=ENV_PATH):
     set_key(env_path, "TRAKT_ACCESS_TOKEN", tokens["access_token"])
     if tokens.get("refresh_token"):
         set_key(env_path, "TRAKT_REFRESH_TOKEN", tokens["refresh_token"])
+
+
+def main():
+    refresh = "--refresh" in sys.argv
+    tokens = refresh_access_token() if refresh else device_login()
+    save_tokens(tokens)
+    print(f"Saved tokens to {ENV_PATH}")
+
+
+if __name__ == "__main__":
+    main()
