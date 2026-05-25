@@ -156,6 +156,27 @@ def split_first_watch(entries):
     return first_watch
 
 
+def fetch_season_premiere(show_id, season_number):
+    response = trakt_request(
+        "GET",
+        f"/shows/{show_id}/seasons/{season_number}/episodes?extended=full",
+    )
+    episodes = sorted(response.json(), key=lambda episode: episode["number"])
+    for episode in episodes:
+        if episode.get("first_aired"):
+            return parse_dt(episode["first_aired"]).date()
+    return None
+
+
+def release_date_range(premiere_date, seed):
+    rng = random.Random(seed)
+    start_offset = rng.randint(30, 45)
+    span = rng.randint(60, 90)
+    start_date = premiere_date + timedelta(days=start_offset)
+    end_date = start_date + timedelta(days=span)
+    return start_date, end_date
+
+
 def find_show(rows, show_name=None, show_id=None):
     episodes = [r for r in rows if r["type"] == "episode"]
     if show_id is not None:
@@ -741,6 +762,43 @@ def main():
         )
     else:
         print("Cancelled. No changes written to Trakt.")
+
+
+def main():
+    args = parse_args()
+    rows = load_rows()
+    show_id, to_fix, blocked, show_name = prepare_season(rows, args.show, args.show_id, args.season)
+
+    premiere = fetch_season_premiere(show_id, args.season)
+    if premiere is None:
+        print(
+            f"No first_aired date found for {show_name} S{args.season:02d}. "
+            "Enter custom start/end dates instead."
+        )
+        prompt_custom_dates(to_fix, blocked, args.seed, show_id, args.season)
+        return
+
+    start_date, end_date = release_date_range(premiere, args.seed)
+    plan = schedule_episodes(to_fix, start_date, end_date, blocked, args.seed)
+    print_plan(
+        plan,
+        start_date,
+        end_date,
+        show_id,
+        args.season,
+        premiere=premiere,
+        range_label="Computed date range",
+    )
+
+    choice = prompt_choice()
+    if choice == "0":
+        print("Cancelled.")
+        return
+    if choice == "1":
+        apply_plan(plan, show_id, args.season)
+        return
+
+    prompt_custom_dates(to_fix, blocked, args.seed, show_id, args.season)
 
 
 if __name__ == "__main__":
