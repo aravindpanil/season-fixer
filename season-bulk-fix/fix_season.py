@@ -10,8 +10,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
-from fetch_history import refresh_watch_history
-from trakt_client import TraktRateLimitError, trakt_get, trakt_post
+from trakt.client import TraktRateLimitError, trakt_get, trakt_post
+from trakt.history import fetch_watch_history
 
 INPUT = Path("data/watch_history.csv")
 IST = ZoneInfo("Asia/Kolkata")
@@ -583,15 +583,13 @@ def apply_plan(
     if refresh_after:
         print("\nRefreshing local watch history...")
         try:
-            rows, path = refresh_watch_history()
+            path = fetch_watch_history()
         except TraktRateLimitError as exc:
             raise SystemExit(
                 f"{exc}\n\nApply succeeded on Trakt. Local CSV was not refreshed; "
                 "run fetch_history.py after the rate limit clears."
             ) from None
-        episodes = sum(1 for r in rows if r["type"] == "episode")
-        movies = sum(1 for r in rows if r["type"] == "movie")
-        print(f"Wrote {len(rows)} rows to {path} ({episodes} episodes, {movies} movies)")
+        print(f"Refreshed watch history at {path}")
     else:
         print("\nRun fetch_history.py to refresh local watch history.")
 

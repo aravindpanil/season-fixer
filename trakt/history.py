@@ -1,20 +1,13 @@
-"""Fetch Trakt episode and movie watch history."""
+"""Fetch Trakt watch history and write to CSV."""
 
 import csv
 from pathlib import Path
 
-from dotenv import load_dotenv
+from trakt.client import maybe_pause_for_get_pagination, trakt_get
 
-from trakt.client import (
-    TraktRateLimitError,
-    maybe_pause_for_get_pagination,
-    trakt_get,
-)
+DEFAULT_OUTPUT = Path("data/watch_history.csv")
 
-OUTPUT = Path("data/watch_history.csv")
-ENV_PATH = Path(".env")
-
-FIELDNAMES = [
+_FIELDNAMES = [
     "type",
     "history_id",
     "watched_at",
@@ -28,7 +21,7 @@ FIELDNAMES = [
 ]
 
 
-def fetch_all_history(history_type):
+def _fetch_pages(history_type):
     page = 1
     items = []
     while True:
@@ -38,8 +31,7 @@ def fetch_all_history(history_type):
             context=f"fetching {history_type} history page {page}",
             recovery="Re-run fetch_history.py after the rate limit clears.",
         )
-        batch = response.json()
-        items.extend(batch)
+        items.extend(response.json())
         page_count = int(response.headers.get("X-Pagination-Page-Count", 1))
         if page >= page_count:
             break
@@ -48,7 +40,7 @@ def fetch_all_history(history_type):
     return items
 
 
-def episode_row(item):
+def _episode_row(item):
     show = item["show"]
     episode = item["episode"]
     return {
@@ -65,7 +57,7 @@ def episode_row(item):
     }
 
 
-def movie_row(item):
+def _movie_row(item):
     movie = item["movie"]
     return {
         "type": "movie",
@@ -81,37 +73,16 @@ def movie_row(item):
     }
 
 
-def fetch_history_rows():
-    load_dotenv(ENV_PATH)
-    episodes = [episode_row(item) for item in fetch_all_history("episodes")]
-    movies = [movie_row(item) for item in fetch_all_history("movies")]
-    rows = episodes + movies
+def fetch_watch_history(output=DEFAULT_OUTPUT):
+    """Fetch episode and movie history from Trakt and write to a CSV file."""
+    rows = [_episode_row(item) for item in _fetch_pages("episodes")]
+    rows.extend(_movie_row(item) for item in _fetch_pages("movies"))
     rows.sort(key=lambda r: r["watched_at"])
-    return rows
 
-
-def write_watch_history(rows, output=OUTPUT):
+    output = Path(output)
     output.parent.mkdir(parents=True, exist_ok=True)
     with output.open("w", newline="", encoding="utf-8") as f:
-        writer = csv.DictWriter(f, fieldnames=FIELDNAMES)
+        writer = csv.DictWriter(f, fieldnames=_FIELDNAMES)
         writer.writeheader()
         writer.writerows(rows)
     return output
-
-
-def refresh_watch_history(output=OUTPUT):
-    rows = fetch_history_rows()
-    path = write_watch_history(rows, output)
-    return rows, path
-
-
-__all__ = [
-    "FIELDNAMES",
-    "OUTPUT",
-    "episode_row",
-    "fetch_all_history",
-    "fetch_history_rows",
-    "movie_row",
-    "refresh_watch_history",
-    "write_watch_history",
-]
