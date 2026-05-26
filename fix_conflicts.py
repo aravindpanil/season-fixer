@@ -9,7 +9,49 @@ from trakt.intervals import row_duration, row_interval, row_title
 from trakt.scheduler import find_nearest_slot, reschedule_on_trakt
 
 
+def _season_episode_key(row):
+    return (row["season_number"], row["episode_number"])
+
+
+def _is_out_of_order(row_a, row_b):
+    """Return the row to move when a later episode starts before an earlier one."""
+    if row_a["type"] != "episode" or row_b["type"] != "episode":
+        return None
+    if row_a["show_id"] != row_b["show_id"]:
+        return None
+
+    key_a = _season_episode_key(row_a)
+    key_b = _season_episode_key(row_b)
+    if key_a == key_b:
+        return None
+
+    start_a, _ = row_interval(row_a)
+    start_b, _ = row_interval(row_b)
+    if key_a > key_b and start_a < start_b:
+        return row_a
+    if key_b > key_a and start_b < start_a:
+        return row_b
+    return None
+
+
+def _movie_vs_episode_to_move(row_a, row_b):
+    """Return the movie when it conflicts with an episode; movies are not episodic."""
+    if row_a["type"] == "movie" and row_b["type"] == "episode":
+        return row_a
+    if row_b["type"] == "movie" and row_a["type"] == "episode":
+        return row_b
+    return None
+
+
 def pick_entry_to_move(row_a, row_b):
+    out_of_order = _is_out_of_order(row_a, row_b)
+    if out_of_order is not None:
+        return out_of_order
+
+    interleaved = _movie_vs_episode_to_move(row_a, row_b)
+    if interleaved is not None:
+        return interleaved
+
     dur_a = row_duration(row_a)
     dur_b = row_duration(row_b)
     if dur_a != dur_b:
