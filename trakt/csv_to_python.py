@@ -4,7 +4,7 @@ import csv
 from datetime import datetime, timezone
 from pathlib import Path
 
-DEFAULT_CSV = Path("data/watch_history.csv")
+from trakt.paths import DEFAULT_CSV
 
 
 def _parse_dt(value):

@@ -2,12 +2,10 @@
 """Detect overlapping watch intervals in Trakt history."""
 
 import csv
-from pathlib import Path
 
 from trakt.csv_to_python import load_rows
 from trakt.intervals import row_duration, row_interval, row_title
-
-OUTPUT = Path(__file__).resolve().parent / "data" / "flagged_conflicts.csv"
+from trakt.paths import FLAGGED_CONFLICTS_CSV
 
 _FIELDNAMES = [
     "history_id_a",
@@ -75,14 +73,14 @@ def main():
     conflicts = detect_conflicts(load_rows())
     print(f"Found {len(conflicts)} overlapping pair(s).")
 
-    OUTPUT.parent.mkdir(parents=True, exist_ok=True)
-    with OUTPUT.open("w", newline="", encoding="utf-8") as f:
+    FLAGGED_CONFLICTS_CSV.parent.mkdir(parents=True, exist_ok=True)
+    with FLAGGED_CONFLICTS_CSV.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=_FIELDNAMES)
         writer.writeheader()
         for conflict in conflicts:
             writer.writerow(conflict_to_csv_row(conflict))
 
-    print(f"Wrote {len(conflicts)} conflict pair(s) to {OUTPUT}")
+    print(f"Wrote {len(conflicts)} conflict pair(s) to {FLAGGED_CONFLICTS_CSV}")
 
 
 if __name__ == "__main__":
