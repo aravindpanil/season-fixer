@@ -60,6 +60,23 @@ python detect_conflicts.py
 
 Prints overlapping pairs with titles and watch timestamps. Answer `y` at the prompt to move entries to the nearest free slot; default is no (audit only).
 
+## detect_order
+
+Detects episodes recorded out of watch order — same-season (e.g. S1E8 before S1E7), skip-ahead, late-watch, and cross-season first-watch violations.
+
+```bash
+python detect_order.py
+```
+
+Prints a summary and writes flagged entries to `data/flagged_order.csv` with an `action` column for review (`fix` or `exclude`).
+
+**Options:**
+
+| Flag | Purpose |
+| --- | --- |
+| `--input PATH` | Use a different watch history CSV (default: `data/watch_history.csv`) |
+| `--exclude SHOW_ID:SEASON:EPISODE` | Skip a specific episode from order checks (repeatable) |
+
 ## reschedule_season
 
 Moves an entire season's first-watch episodes into a date range. Episodes keep narrative order; end times are spread randomly across equal slots in that window. Prints a preview and asks for approval before updating Trakt (two API calls: bulk remove + bulk add).
