@@ -1,7 +1,59 @@
 #!/usr/bin/env python3
 """Reschedule overlapping watch entries to the nearest free time slot."""
 
+from trakt.client import to_trakt_iso, trakt_post
 from trakt.intervals import merge_intervals, row_duration, row_interval
+
+
+def _remove_history(history_id):
+    trakt_post("/sync/history/remove", {"ids": [history_id]})
+
+
+def _add_episode(row, new_end):
+    trakt_post(
+        "/sync/history",
+        {
+            "shows": [
+                {
+                    "ids": {"trakt": row["show_id"]},
+                    "seasons": [
+                        {
+                            "number": row["season_number"],
+                            "episodes": [
+                                {
+                                    "number": row["episode_number"],
+                                    "watched_at": to_trakt_iso(new_end),
+                                }
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+
+def _add_movie(row, new_end):
+    trakt_post(
+        "/sync/history",
+        {
+            "movies": [
+                {
+                    "ids": {"trakt": row["item_trakt_id"]},
+                    "watched_at": to_trakt_iso(new_end),
+                }
+            ],
+        },
+    )
+
+
+def reschedule_on_trakt(row, new_end):
+    """Remove row from Trakt history and re-add at new_end."""
+    _remove_history(row["history_id"])
+    if row["type"] == "episode":
+        _add_episode(row, new_end)
+    else:
+        _add_movie(row, new_end)
 
 
 def _clamp(value, lo, hi):
@@ -39,7 +91,7 @@ def _candidate_end(original_end, gap_start, gap_end, duration):
 def find_nearest_slot(row, rows):
     """Return the end time closest to row's current end that fits without overlap.
 
-    Uses every other row as occupied blocks. See nearest-slot-algorithm.md.
+    Uses every other row as occupied blocks.
     """
     duration = row_duration(row)
     original_end = row["watched_dt"]
