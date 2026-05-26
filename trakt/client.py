@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import argparse
-import json
-import math
 import os
 import time
 from datetime import datetime, timezone
-from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
@@ -23,47 +20,16 @@ BASE = "https://api.trakt.tv"
 
 POST_DELAY = 1.0
 OAUTH_TIMEOUT = 60
-MAX_5XX_RETRIES = 3
-SERVER_ERROR_BACKOFF_SECONDS = 5
+DEVICE_LOGIN_5XX_PAUSE = 5
+
+RATE_LIMIT_MESSAGE = "Rate limited by Trakt. Wait a minute and re-run."
 
 
 class TraktRateLimitError(Exception):
     """Raised when Trakt returns HTTP 429."""
 
 
-def _retry_after_seconds(response: Response, *, fallback: float = 60.0) -> float:
-    """Parse Retry-After as seconds or an HTTP-date; fall back when missing or invalid."""
-    retry_after = response.headers.get("Retry-After")
-    if not retry_after:
-        return fallback
-    try:
-        return max(0.0, float(retry_after))
-    except ValueError:
-        pass
-    try:
-        reset_dt = parsedate_to_datetime(retry_after)
-        if reset_dt.tzinfo is None:
-            reset_dt = reset_dt.replace(tzinfo=timezone.utc)
-        return max(0.0, (reset_dt - datetime.now(timezone.utc)).total_seconds())
-    except (TypeError, ValueError, OverflowError):
-        return fallback
-
-
-def _rate_limit_message(response: Response) -> str:
-    minutes = max(1, math.ceil(_retry_after_seconds(response) / 60))
-
-    limit_name = ""
-    try:
-        info = json.loads(response.headers.get("X-Ratelimit", "{}"))
-        if info.get("name"):
-            limit_name = f" ({info['name']})"
-    except (json.JSONDecodeError, TypeError):
-        pass
-
-    return f"Rate limited{limit_name}. Wait {minutes} minute(s) before retrying."
-
-
-def _raw_request(
+def _http_request(
     method: str,
     path: str,
     *,
@@ -103,10 +69,19 @@ def trakt_request(
     authed: bool = True,
     timeout: float = 120,
 ) -> Response:
-    retried_auth = False
-    retry_5xx = 0
-    while True:
-        response = _raw_request(
+    response = _http_request(
+        method.upper(),
+        path,
+        json_body=json_body,
+        params=params,
+        authed=authed,
+        timeout=timeout,
+    )
+
+    if response.status_code == 401 and authed:
+        tokens = refresh_access_token()
+        save_tokens(tokens, ENV_PATH)
+        response = _http_request(
             method.upper(),
             path,
             json_body=json_body,
@@ -115,22 +90,11 @@ def trakt_request(
             timeout=timeout,
         )
 
-        if response.status_code == 401 and authed and not retried_auth:
-            tokens = refresh_access_token()
-            save_tokens(tokens, ENV_PATH)
-            retried_auth = True
-            continue
+    if response.status_code == 429:
+        raise TraktRateLimitError(RATE_LIMIT_MESSAGE)
 
-        if response.status_code == 429:
-            raise TraktRateLimitError(_rate_limit_message(response))
-
-        if response.status_code >= 500 and retry_5xx < MAX_5XX_RETRIES:
-            time.sleep(SERVER_ERROR_BACKOFF_SECONDS * (2**retry_5xx))
-            retry_5xx += 1
-            continue
-
-        response.raise_for_status()
-        return response
+    response.raise_for_status()
+    return response
 
 
 def trakt_get(
@@ -197,7 +161,7 @@ def device_login() -> dict[str, Any]:
     expires_at = time.time() + codes.get("expires_in", 600)
 
     while time.time() < expires_at:
-        token_response = _raw_request(
+        token_response = _http_request(
             "POST",
             "/oauth/device/token",
             json_body={
@@ -215,12 +179,9 @@ def device_login() -> dict[str, Any]:
         if token_response.status_code == 400:
             pass
         elif token_response.status_code == 429:
-            wait_seconds = _retry_after_seconds(token_response)
-            print(_rate_limit_message(token_response))
-            time.sleep(wait_seconds)
-            interval = min(interval + 1, 10)
+            raise TraktRateLimitError(RATE_LIMIT_MESSAGE)
         elif token_response.status_code >= 500:
-            time.sleep(SERVER_ERROR_BACKOFF_SECONDS)
+            time.sleep(DEVICE_LOGIN_5XX_PAUSE)
         else:
             token_response.raise_for_status()
 
@@ -267,7 +228,10 @@ def main() -> None:
         help="Refresh the access token instead of running device login.",
     )
     args = parser.parse_args()
-    tokens = refresh_access_token() if args.refresh else device_login()
+    try:
+        tokens = refresh_access_token() if args.refresh else device_login()
+    except TraktRateLimitError as exc:
+        raise SystemExit(str(exc)) from None
     save_tokens(tokens)
     print(f"Saved tokens to {ENV_PATH}")
 
