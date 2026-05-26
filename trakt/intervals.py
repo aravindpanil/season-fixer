@@ -1,4 +1,4 @@
-"""Watch-interval helpers shared by detect_conflicts and fix_conflicts."""
+"""Watch-interval helpers shared by detect_conflicts."""
 
 from datetime import timedelta
 

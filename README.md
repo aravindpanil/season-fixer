@@ -52,13 +52,13 @@ Writes `data/watch_history.csv` (episodes and movies with runtimes).
 
 ## detect_conflicts
 
-Detects overlapping watch intervals in your Trakt history — pairs of entries where the computed watch windows physically overlap, indicating incorrect timestamps.
+Detects overlapping watch intervals in your Trakt history — pairs of entries where the computed watch windows physically overlap, indicating incorrect timestamps. Lists each pair, then asks whether to reschedule them on Trakt.
 
 ```bash
 python detect_conflicts.py
 ```
 
-Prints each overlapping pair with titles and watch timestamps (read-only audit; does not modify Trakt).
+Prints overlapping pairs with titles and watch timestamps. Answer `y` at the prompt to move entries to the nearest free slot; default is no (audit only).
 
 ## reschedule_season
 
@@ -68,7 +68,7 @@ Moves an entire season's first-watch episodes into a date range. Episodes keep n
 python reschedule_season.py --show-id 13855 --season 1 --start 2020-01-01 --end 2020-12-31
 ```
 
-Use the `show_id` column from `data/watch_history.csv`. After applying, run `fix_conflicts.py` if overlaps may remain.
+Use the `show_id` column from `data/watch_history.csv`. After applying, run `detect_conflicts.py` if overlaps may remain.
 
 **Options:**
 

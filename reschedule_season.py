@@ -184,7 +184,7 @@ def main():
 
     print(f"Rescheduled {len(episodes)} episode(s).")
     print(f"Refreshed watch history at {path}")
-    print("Run fix_conflicts.py if new overlaps may exist.")
+    print("Run detect_conflicts.py if new overlaps may exist.")
 
 
 if __name__ == "__main__":
