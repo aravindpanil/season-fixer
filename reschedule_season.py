@@ -1,10 +1,15 @@
 #!/usr/bin/env python3
 """Reschedule first-watch episodes for a show season into a date range."""
 
+import argparse
 import random
 from datetime import datetime, timedelta, timezone
+from pathlib import Path
 
+from trakt.client import TraktRateLimitError, to_trakt_iso, trakt_post
+from trakt.csv_to_python import DEFAULT_CSV, load_rows
 from trakt.episodes import split_first_watch
+from trakt.history import fetch_watch_history
 from trakt.intervals import row_duration, row_title
 
 
@@ -81,3 +86,92 @@ def generate_target_times(episodes, start_dt, end_dt):
         target_times.append(slot_start + duration + offset)
 
     return target_times
+
+
+def print_timetable(episodes, target_times):
+    """Print one old -> new line per episode."""
+    for episode, target_time in zip(episodes, target_times):
+        print(
+            f"{row_title(episode)}: {episode['watched_at']} -> "
+            f"{to_trakt_iso(target_time)}"
+        )
+
+
+def confirm_apply():
+    """Return True only when the user approves with y/yes."""
+    answer = input("Apply these changes? [y/N]: ").strip().casefold()
+    return answer in ("y", "yes")
+
+
+def batch_reschedule(episodes, target_times):
+    """Remove all episodes in one call and re-add them at new times."""
+    trakt_post(
+        "/sync/history/remove",
+        {"ids": [episode["history_id"] for episode in episodes]},
+    )
+    trakt_post(
+        "/sync/history",
+        {
+            "shows": [
+                {
+                    "ids": {"trakt": episodes[0]["show_id"]},
+                    "seasons": [
+                        {
+                            "number": episodes[0]["season_number"],
+                            "episodes": [
+                                {
+                                    "number": episode["episode_number"],
+                                    "watched_at": to_trakt_iso(target_time),
+                                }
+                                for episode, target_time in zip(episodes, target_times)
+                            ],
+                        }
+                    ],
+                }
+            ],
+        },
+    )
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--show", required=True, help="Show name substring to match")
+    parser.add_argument("--season", type=int, required=True, help="Season number")
+    parser.add_argument(
+        "--start", required=True, help="Start date (YYYY-MM-DD, UTC start of day)"
+    )
+    parser.add_argument(
+        "--end", required=True, help="End date (YYYY-MM-DD, UTC end of day)"
+    )
+    parser.add_argument(
+        "--csv",
+        type=Path,
+        default=DEFAULT_CSV,
+        help="Watch history CSV (default: data/watch_history.csv)",
+    )
+    args = parser.parse_args()
+
+    try:
+        rows = load_rows(args.csv)
+        start_dt, end_dt = parse_date_range(args.start, args.end)
+        episodes = find_season_rows(rows, args.show, args.season)
+        target_times = generate_target_times(episodes, start_dt, end_dt)
+        print_timetable(episodes, target_times)
+        if not confirm_apply():
+            print("Aborted.")
+            return
+
+        batch_reschedule(episodes, target_times)
+        path = fetch_watch_history()
+    except ValueError as exc:
+        raise SystemExit(str(exc)) from None
+    except TraktRateLimitError as exc:
+        raise SystemExit(str(exc)) from None
+
+    print(f"Rescheduled {len(episodes)} episode(s).")
+    print(f"Refreshed watch history at {path}")
+    print("Run fix_conflicts.py if new overlaps may exist.")
+
+
+if __name__ == "__main__":
+    main()
