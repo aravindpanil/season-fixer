@@ -2,19 +2,9 @@
 
 import csv
 import time
-from pathlib import Path
 
 from trakt.client import TraktRateLimitError, trakt_get
-
-DEFAULT_OUTPUT = Path("data/watch_history.csv")
-
-GET_PAGE_PAUSE = 0.35
-GET_PAGE_PAUSE_AFTER = 5
-
-
-def _maybe_pause_for_get_pagination(page: int) -> None:
-    if page >= GET_PAGE_PAUSE_AFTER:
-        time.sleep(GET_PAGE_PAUSE)
+from trakt.csv_to_python import DEFAULT_CSV
 
 # Columns in the final watch history CSV
 _FIELDNAMES = [
@@ -43,7 +33,8 @@ def _fetch_pages(history_type):
         page_count = int(response.headers.get("X-Pagination-Page-Count", 1))
         if page >= page_count:
             break
-        _maybe_pause_for_get_pagination(page)
+        if page >= 5:
+            time.sleep(0.35)
         page += 1
     return items
 
@@ -97,16 +88,15 @@ def fetch_watch_history():
         "shows": len({r["show_id"] for r in episode_rows}),
     }
 
-    output = DEFAULT_OUTPUT
-    output.parent.mkdir(parents=True, exist_ok=True)
-    with output.open("w", newline="", encoding="utf-8") as f:
+    DEFAULT_CSV.parent.mkdir(parents=True, exist_ok=True)
+    with DEFAULT_CSV.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=_FIELDNAMES)
         writer.writeheader()
         writer.writerows(rows)
-    return output, stats
+    return DEFAULT_CSV, stats
 
 
-def main():
+if __name__ == "__main__":
     try:
         path, stats = fetch_watch_history()
     except TraktRateLimitError as exc:
@@ -115,7 +105,3 @@ def main():
         f"Wrote {stats['episodes']} episode(s) from {stats['shows']} show(s) "
         f"and {stats['movies']} movie(s) to {path}"
     )
-
-
-if __name__ == "__main__":
-    main()
