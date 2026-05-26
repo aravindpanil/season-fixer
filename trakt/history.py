@@ -1,11 +1,20 @@
 """Fetch Trakt watch history and write to CSV."""
 
 import csv
+import time
 from pathlib import Path
 
-from trakt.client import maybe_pause_for_get_pagination, trakt_get
+from trakt.client import trakt_get
 
 DEFAULT_OUTPUT = Path("data/watch_history.csv")
+
+GET_PAGE_PAUSE = 0.35
+GET_PAGE_PAUSE_AFTER = 5
+
+
+def _maybe_pause_for_get_pagination(page: int) -> None:
+    if page >= GET_PAGE_PAUSE_AFTER:
+        time.sleep(GET_PAGE_PAUSE)
 
 # Columns in the final watch history CSV
 _FIELDNAMES = [
@@ -34,7 +43,7 @@ def _fetch_pages(history_type):
         page_count = int(response.headers.get("X-Pagination-Page-Count", 1))
         if page >= page_count:
             break
-        maybe_pause_for_get_pagination(page)
+        _maybe_pause_for_get_pagination(page)
         page += 1
     return items
 

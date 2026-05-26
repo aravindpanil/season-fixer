@@ -7,7 +7,8 @@ import json
 import math
 import os
 import time
-from datetime import timezone
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from pathlib import Path
 from typing import Any
 
@@ -21,20 +22,35 @@ load_dotenv(ENV_PATH)
 BASE = "https://api.trakt.tv"
 
 POST_DELAY = 1.0
-GET_PAGE_PAUSE = 0.35
-GET_PAGE_PAUSE_AFTER = 5
 OAUTH_TIMEOUT = 60
 MAX_5XX_RETRIES = 3
 SERVER_ERROR_BACKOFF_SECONDS = 5
 
-# Custom exception for rate limiting
+
 class TraktRateLimitError(Exception):
     """Raised when Trakt returns HTTP 429."""
 
-# Helper function to format the rate limit message
-def _rate_limit_message(response: Response) -> str:
+
+def _retry_after_seconds(response: Response, *, fallback: float = 60.0) -> float:
+    """Parse Retry-After as seconds or an HTTP-date; fall back when missing or invalid."""
     retry_after = response.headers.get("Retry-After")
-    minutes = math.ceil(int(retry_after) / 60) if retry_after else 1
+    if not retry_after:
+        return fallback
+    try:
+        return max(0.0, float(retry_after))
+    except ValueError:
+        pass
+    try:
+        reset_dt = parsedate_to_datetime(retry_after)
+        if reset_dt.tzinfo is None:
+            reset_dt = reset_dt.replace(tzinfo=timezone.utc)
+        return max(0.0, (reset_dt - datetime.now(timezone.utc)).total_seconds())
+    except (TypeError, ValueError, OverflowError):
+        return fallback
+
+
+def _rate_limit_message(response: Response) -> str:
+    minutes = max(1, math.ceil(_retry_after_seconds(response) / 60))
 
     limit_name = ""
     try:
@@ -46,18 +62,7 @@ def _rate_limit_message(response: Response) -> str:
 
     return f"Rate limited{limit_name}. Wait {minutes} minute(s) before retrying."
 
-# Helper function to set the headers for the request
-def _headers(*, authed: bool = True) -> dict[str, str]:
-    headers = {
-        "Content-Type": "application/json",
-        "trakt-api-version": "2",
-        "trakt-api-key": os.environ["TRAKT_CLIENT_ID"],
-    }
-    if authed:
-        headers["Authorization"] = f"Bearer {os.environ['TRAKT_ACCESS_TOKEN']}"
-    return headers
 
-"""Helper function to make the raw request to the Trakt API"""
 def _raw_request(
     method: str,
     path: str,
@@ -67,23 +72,26 @@ def _raw_request(
     authed: bool = True,
     timeout: float = 120,
 ) -> Response:
+    """Make a raw HTTP request to the Trakt API without retry or error handling."""
     method_upper = method.upper()
+    headers = {
+        "Content-Type": "application/json",
+        "trakt-api-version": "2",
+        "trakt-api-key": os.environ["TRAKT_CLIENT_ID"],
+    }
+    if authed:
+        headers["Authorization"] = f"Bearer {os.environ['TRAKT_ACCESS_TOKEN']}"
     response = requests.request(
         method_upper,
         f"{BASE}{path}",
         json=json_body,
         params=params,
-        headers=_headers(authed=authed),
+        headers=headers,
         timeout=timeout,
     )
     if method_upper in {"POST", "PUT", "DELETE"}:
         time.sleep(POST_DELAY)
     return response
-
-
-def maybe_pause_for_get_pagination(page: int) -> None:
-    if page >= GET_PAGE_PAUSE_AFTER:
-        time.sleep(GET_PAGE_PAUSE)
 
 
 def trakt_request(
@@ -92,70 +100,51 @@ def trakt_request(
     *,
     json_body: dict[str, Any] | None = None,
     params: dict[str, Any] | None = None,
-    context: str | None = None,
     authed: bool = True,
     timeout: float = 120,
-    _retried_auth: bool = False,
-    _retry_5xx: int = 0,
 ) -> Response:
-    response = _raw_request(
-        method.upper(),
-        path,
-        json_body=json_body,
-        params=params,
-        authed=authed,
-        timeout=timeout,
-    )
-
-    if response.status_code == 401 and authed and not _retried_auth:
-        tokens = refresh_access_token()
-        save_tokens(tokens, ENV_PATH)
-        return trakt_request(
-            method,
+    retried_auth = False
+    retry_5xx = 0
+    while True:
+        response = _raw_request(
+            method.upper(),
             path,
             json_body=json_body,
             params=params,
-            context=context,
             authed=authed,
             timeout=timeout,
-            _retried_auth=True,
         )
 
-    if response.status_code == 429:
-        raise TraktRateLimitError(_rate_limit_message(response))
+        if response.status_code == 401 and authed and not retried_auth:
+            tokens = refresh_access_token()
+            save_tokens(tokens, ENV_PATH)
+            retried_auth = True
+            continue
 
-    if response.status_code >= 500 and _retry_5xx < MAX_5XX_RETRIES:
-        time.sleep(SERVER_ERROR_BACKOFF_SECONDS * (2**_retry_5xx))
-        return trakt_request(
-            method,
-            path,
-            json_body=json_body,
-            params=params,
-            context=context,
-            authed=authed,
-            timeout=timeout,
-            _retried_auth=_retried_auth,
-            _retry_5xx=_retry_5xx + 1,
-        )
+        if response.status_code == 429:
+            raise TraktRateLimitError(_rate_limit_message(response))
 
-    response.raise_for_status()
-    return response
+        if response.status_code >= 500 and retry_5xx < MAX_5XX_RETRIES:
+            time.sleep(SERVER_ERROR_BACKOFF_SECONDS * (2**retry_5xx))
+            retry_5xx += 1
+            continue
+
+        response.raise_for_status()
+        return response
 
 
 def trakt_get(
     path: str,
     params: dict[str, Any] | None = None,
-    context: str | None = None,
     timeout: float = 60,
 ) -> Response:
-    return trakt_request("GET", path, params=params, context=context, timeout=timeout)
+    return trakt_request("GET", path, params=params, timeout=timeout)
 
 
 def trakt_post(
     path: str,
     json_body: dict[str, Any],
     *,
-    context: str | None = None,
     authed: bool = True,
     timeout: float = 60,
 ) -> Response:
@@ -163,13 +152,12 @@ def trakt_post(
         "POST",
         path,
         json_body=json_body,
-        context=context,
         authed=authed,
         timeout=timeout,
     )
 
 
-def to_trakt_iso(dt):
+def to_trakt_iso(dt: datetime) -> str:
     """Format a datetime as the millisecond-precision UTC string Trakt expects on POST."""
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%S.000Z")
 
@@ -227,7 +215,9 @@ def device_login() -> dict[str, Any]:
         if token_response.status_code == 400:
             pass
         elif token_response.status_code == 429:
+            wait_seconds = _retry_after_seconds(token_response)
             print(_rate_limit_message(token_response))
+            time.sleep(wait_seconds)
             interval = min(interval + 1, 10)
         elif token_response.status_code >= 500:
             time.sleep(SERVER_ERROR_BACKOFF_SECONDS)
