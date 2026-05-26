@@ -161,7 +161,7 @@ def main():
         "--csv",
         type=Path,
         default=DEFAULT_CSV,
-        help="Watch history CSV (default: data/watch_history.csv)",
+        help=f"Watch history CSV (default: {DEFAULT_CSV})",
     )
     args = parser.parse_args()
 
