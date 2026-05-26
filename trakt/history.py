@@ -96,12 +96,16 @@ def fetch_watch_history():
     return DEFAULT_CSV, stats
 
 
+def print_fetch_stats(path, stats):
+    print(
+        f"Wrote {stats['episodes']} episode(s) from {stats['shows']} show(s) "
+        f"and {stats['movies']} movie(s) to {path}"
+    )
+
+
 if __name__ == "__main__":
     try:
         path, stats = fetch_watch_history()
     except TraktRateLimitError as exc:
         raise SystemExit(str(exc)) from None
-    print(
-        f"Wrote {stats['episodes']} episode(s) from {stats['shows']} show(s) "
-        f"and {stats['movies']} movie(s) to {path}"
-    )
+    print_fetch_stats(path, stats)
