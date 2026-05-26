@@ -64,11 +64,13 @@ Prints a summary and writes flagged pairs to `data/flagged_conflicts.csv`.
 
 ## detect_order
 
-Detects episodes recorded out of watch order — first-watch entries where a later episode number was logged before an earlier one in the same season.
+Detects episodes recorded out of watch order — same-season (e.g. S1E8 before S1E7) and cross-season (e.g. S1E12 before S2E3) first-watch violations.
 
 ```bash
 python detect_order.py
 ```
+
+Prints a summary and writes flagged entries to `data/flagged_order.csv` with an `action` column for review (`fix` or `exclude`).
 
 **Options:**
 
