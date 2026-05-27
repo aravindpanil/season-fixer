@@ -9,3 +9,4 @@ venv/
 !README.md
 trakt_scripts.egg-info/
 .cursor/
+uv.lock

@@ -2,7 +2,9 @@
 """Reschedule first-watch episodes for a show season into a date range."""
 
 import argparse
+import difflib
 import random
+import re
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -11,6 +13,86 @@ from trakt.csv_to_python import DEFAULT_CSV, load_rows
 from trakt.episodes import split_first_watch
 from trakt.history import fetch_watch_history
 from trakt.intervals import row_duration, row_title
+
+
+def normalize_show_name(name):
+    """Return lowercase name with punctuation removed for matching."""
+    return re.sub(r"[^\w\s]", "", name.casefold())
+
+
+def build_show_name_map(rows):
+    """Return normalized show name -> (original show name, show_id)."""
+    show_map = {}
+    for row in rows:
+        if row["type"] != "episode":
+            continue
+        show_name = row["show_name"]
+        if not show_name:
+            continue
+        show_map[normalize_show_name(show_name)] = (show_name, row["show_id"])
+    return show_map
+
+
+def find_show_matches(query, show_map):
+    """Return (show_name, show_id) candidates: exact, then substring, then fuzzy."""
+    normalized = normalize_show_name(query)
+
+    if normalized in show_map:
+        return [show_map[normalized]]
+
+    # SubString matching if exact match not found
+    # Searches for multiple entries and returns all of them. Only adds to candidates if the value is not already in the set.
+    candidates = []
+    seen_ids = set()
+    for key, value in show_map.items():
+        if normalized in key or key in normalized:
+            show_id = value[1]
+            if show_id not in seen_ids:
+                seen_ids.add(show_id)
+                candidates.append(value)
+    if candidates:
+        return candidates
+
+    # Fuzzy matching
+    for key in difflib.get_close_matches(normalized, show_map, n=5, cutoff=0.6):
+        value = show_map[key]
+        show_id = value[1]
+        if show_id not in seen_ids:
+            seen_ids.add(show_id)
+            candidates.append(value)
+    return candidates
+
+
+def prompt_show_choice(candidates):
+    """Return chosen (show_name, show_id) or exit when the user cancels."""
+    if len(candidates) == 1:
+        return candidates[0]
+
+    print("Multiple shows matched:")
+    for index, (show_name, show_id) in enumerate(candidates, 1):
+        print(f"  {index}. {show_name} (show_id {show_id})")
+    print("  0. Cancel")
+
+    while True:
+        answer = input(f"Choose a show [1-{len(candidates)} / 0 cancel]: ").strip()
+        if answer == "0":
+            raise SystemExit("Cancelled.")
+        try:
+            choice = int(answer)
+        except ValueError:
+            print("Enter a number.")
+            continue
+        if 1 <= choice <= len(candidates):
+            return candidates[choice - 1]
+        print("Invalid choice.")
+
+
+def resolve_show(query, show_map):
+    """Resolve a show name query to (show_name, show_id)."""
+    matches = find_show_matches(query, show_map)
+    if not matches:
+        raise ValueError(f"No show found matching {query!r}")
+    return prompt_show_choice(matches)
 
 
 def parse_date_range(start, end):
@@ -130,10 +212,9 @@ def batch_reschedule(episodes, target_times):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument(
-        "--show-id",
-        type=int,
+        "--show-name",
         required=True,
-        help="Trakt show ID from watch history CSV (show_id column)",
+        help="Show name from watch history CSV (show_name column)",
     )
     parser.add_argument("--season", type=int, required=True, help="Season number")
     parser.add_argument(
@@ -152,8 +233,10 @@ def main():
 
     try:
         rows = load_rows(args.csv)
+        show_map = build_show_name_map(rows)
+        _, show_id = resolve_show(args.show_name, show_map)
         start_dt, end_dt = parse_date_range(args.start, args.end)
-        episodes = find_season_rows(rows, args.show_id, args.season)
+        episodes = find_season_rows(rows, show_id, args.season)
         target_times = generate_target_times(episodes, start_dt, end_dt)
         print_timetable(episodes, target_times)
         if not confirm_apply():
