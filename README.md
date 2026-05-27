@@ -67,16 +67,15 @@ Prints a summary and writes flagged pairs to `data/flagged_conflicts.csv`.
 Moves an entire season's first-watch episodes into a date range. Episodes keep narrative order; end times are spread randomly across equal slots in that window. Prints a preview and asks for approval before updating Trakt (two API calls: bulk remove + bulk add).
 
 ```bash
-python reschedule_season.py --show-id 13855 --season 1 --start 2020-01-01 --end 2020-12-31
+python reschedule_season.py --show-name "Breaking Bad" --season 1 --start 2020-01-01 --end 2020-12-31
 ```
 
-Use the `show_id` column from `data/watch_history.csv`. After applying, run `fix_conflicts.py` if overlaps may remain.
+The show name is matched against `show_name` values in `data/watch_history.csv` (case and punctuation are ignored). Partial matches work as it does a fuzzy search. If more than one show matches, you get a numbered list to pick from (or `0` to cancel). After applying, run `fix_conflicts.py` if overlaps may remain.
 
 **Options:**
 
 | Flag | Purpose |
 | --- | --- |
-| `--show-id ID` | Trakt show ID from watch history CSV (required) |
+| `--show-name NAME` | Show name from watch history CSV (required) |
 | `--season N` | Season number (required) |
 | `--start` / `--end` | Date range `YYYY-MM-DD` (UTC start/end of day) |
-| `--csv PATH` | Watch history CSV (default: `data/watch_history.csv`) |
