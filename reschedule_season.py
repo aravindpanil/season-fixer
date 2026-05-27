@@ -126,7 +126,7 @@ def find_season_rows(rows, show_id, season):
     complete = False
     for entry in season_rows:
         if complete:
-            continue
+            break
         if entry["episode_number"] in seen:
             continue
         first_watch.append(entry)
