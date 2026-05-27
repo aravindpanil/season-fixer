@@ -68,7 +68,7 @@ def trakt_request(
     timeout: float = 120,
 ) -> Response:
     response = _http_request(
-        method.upper(),
+        method,
         path,
         json_body=json_body,
         params=params,
