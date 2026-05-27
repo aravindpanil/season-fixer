@@ -19,6 +19,19 @@ def normalize_show_name(name):
     return re.sub(r"[^\w\s]", "", name.casefold())
 
 
+def build_show_name_map(rows):
+    """Return normalized show name -> (original show name, show_id)."""
+    show_map = {}
+    for row in rows:
+        if row["type"] != "episode":
+            continue
+        show_name = row["show_name"]
+        if not show_name:
+            continue
+        show_map[normalize_show_name(show_name)] = (show_name, row["show_id"])
+    return show_map
+
+
 def parse_date_range(start, end):
     """Return UTC start-of-day and end-of-day datetimes for ``YYYY-MM-DD`` strings."""
     start_dt = datetime.strptime(start, "%Y-%m-%d").replace(tzinfo=timezone.utc)
@@ -157,6 +170,7 @@ def main():
 
     try:
         rows = load_rows(args.csv)
+        show_map = build_show_name_map(rows)
         start_dt, end_dt = parse_date_range(args.start, args.end)
         episodes = find_season_rows(rows, args.show_id, args.season)
         target_times = generate_target_times(episodes, start_dt, end_dt)
