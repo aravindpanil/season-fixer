@@ -118,15 +118,9 @@ Detects out-of-order **first-watch** episodes — entries logged before a narrat
 python detect_order.py
 ```
 
-Prints a summary and writes violations to `data/flagged_order.csv` with an `action` column for manual review.
+Prints a summary and writes violations to `data/flagged_order.csv`
 
-**Review workflow:**
-
-1. Open `data/flagged_order.csv`
-2. Set `action = exclude` for intentional non-linear watches (e.g. anthology shows)
-3. Re-run `detect_order.py` — existing `action` values are preserved
-
-When violations exist, the script prints a static `reschedule_season.py` command with placeholders (`SHOW_ID`, `N`, `YYYY-MM-DD`) plus a one-liner to look up `show_id` from a show name.
+When violations exist, the script prints a static `reschedule_season.py` command with placeholders (`SHOW_NAME`, `N`, `YYYY-MM-DD`)
 
 **Options:** none (reads `data/watch_history.csv`)
 

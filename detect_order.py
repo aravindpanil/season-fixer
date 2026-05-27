@@ -17,8 +17,7 @@ _CSV_FIELDNAMES = [
     "episode_number",
     "watched_at",
     "expected_after_title",
-    "expected_after_watched_at",
-    "action",
+    "expected_after_watched_at"
 ]
 
 
@@ -51,17 +50,8 @@ def detect_violations(episodes):
     return violations
 
 
-def _load_existing_actions(path):
-    path = Path(path)
-    if not path.exists():
-        return {}
-    with path.open(newline="", encoding="utf-8") as f:
-        return {int(r["history_id"]): r.get("action", "") for r in csv.DictReader(f)}
-
-
 def write_violations_csv(violations, output_path):
     output_path = Path(output_path)
-    existing_actions = _load_existing_actions(output_path)
     output_path.parent.mkdir(parents=True, exist_ok=True)
     with output_path.open("w", newline="", encoding="utf-8") as f:
         writer = csv.DictWriter(f, fieldnames=_CSV_FIELDNAMES)
@@ -69,14 +59,13 @@ def write_violations_csv(violations, output_path):
         for v in violations:
             row, ea = v["row"], v["expected_after_row"]
             writer.writerow({
-                "history_id": row["history_id"],
-                "show_name": row["show_name"],
-                "season_number": row["season_number"],
-                "episode_number": row["episode_number"],
-                "watched_at": row["watched_at"],
-                "expected_after_title": row_title(ea),
-                "expected_after_watched_at": ea["watched_at"],
-                "action": existing_actions.get(row["history_id"], ""),
+                "history_id": row.get("history_id"),
+                "show_name": row.get("show_name"),
+                "season_number": row.get("season_number"),
+                "episode_number": row.get("episode_number"),
+                "watched_at": row.get("watched_at"),
+                "expected_after_title": row_title(ea) if ea else "",
+                "expected_after_watched_at": ea.get("watched_at") if ea else "",
             })
 
 
